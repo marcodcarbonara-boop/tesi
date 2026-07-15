@@ -5,30 +5,38 @@ Repository containing the custom modules developed for the ns-3 simulation of in
 ## Installation
 
 Clone the repository:
-git clone git@github.com:EnZy46/SteeringTN-NTN.git
 
+```bash
+git clone git@github.com:EnZy46/SteeringTN-NTN.git
+```
 
 ## ns-3 Project Configuration
 
 Download a compatible version of ns-3.
 
-Copy the contents of the `scratch` folder from the repository into the `scratch` folder of the ns-3 project.
+Copy the contents of the `scratch` folder from this repository into the `scratch` folder of the ns-3 project.
 
-Copy the contents of the `src` folder from the repository into the `src` folder of the ns-3 project.
+Copy the contents of the `src` folder from this repository into the `src` folder of the ns-3 project.
 
 From the main ns-3 directory, run:
+
+```bash
 ./ns3 configure
+```
 
 Build the project:
-./ns3 build
 
+```bash
+./ns3 build
+```
 
 ## Execution
 
 To run a simulation:
+
+```bash
 ./ns3 run scratch/main
-
-
+```
 
 ## Output
 
