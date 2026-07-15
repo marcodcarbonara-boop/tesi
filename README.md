@@ -29,6 +29,9 @@ Build the project:
 ```bash
 ./ns3 build
 ```
+## Attention
+
+Before compiling the project, update the absolute paths present in the custom modules inside the `src` folder according to the local ns-3 installation path.
 
 ## Execution
 
