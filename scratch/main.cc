@@ -119,7 +119,7 @@ file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NT
     int selectedFile = validFiles[distrib(rng)];
 
     //CAMBIARE SE LA POSIZIONE DEI FILE È DIVERSA
-    string basePath = "/home/ubuntu/ns-3-dev/scratch/tn-ntn-ns3/moduli/resources/positions1km/";
+    string basePath = "/home/pasta1/ns-allinone-3.38/ns-3.38/scratch/moduli/resources/positions1km/";
 
     stringstream ss;
     ss << basePath << selectedFile << ".csv";

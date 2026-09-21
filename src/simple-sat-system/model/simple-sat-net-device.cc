@@ -460,7 +460,7 @@ SimpleSatNetDevice::SendFrom(Ptr<Packet> p,
 
     if (m_queue->Enqueue(p)) //prova ad aggiungere il pacchetto
     {
-        if (m_queue->GetNPackets() == 1 && !FinishTransmissionEvent.IsPending())
+        if (m_queue->GetNPackets() == 1 && !FinishTransmissionEvent.IsRunning())
         {
             StartTransmission();
         }
@@ -478,7 +478,7 @@ SimpleSatNetDevice::StartTransmission()
     {
         return;
     }
-    NS_ASSERT_MSG(!FinishTransmissionEvent.IsPending(),
+    NS_ASSERT_MSG(!FinishTransmissionEvent.IsRunning(),
                   "Tried to transmit a packet while another transmission was in progress");
     Ptr<Packet> packet = m_queue->Dequeue();
 
@@ -560,7 +560,7 @@ SimpleSatNetDevice::DoDispose()
     m_node = nullptr;
     m_receiveErrorModel = nullptr;
     m_queue->Dispose();
-    if (FinishTransmissionEvent.IsPending())
+    if (FinishTransmissionEvent.IsRunning())
     {
         FinishTransmissionEvent.Cancel();
     }
@@ -612,7 +612,7 @@ void
 SimpleSatNetDevice::ScheduleDataRateUpdatesFromCsv()
 {
     // Base path for the CSV files
-    const std::string basePath = "/home/ubuntu/ns-3-dev/scratch/tn-ntn-ns3/moduli/resources/sat_tput_30min/";
+    const std::string basePath = "/home/pasta1/ns-allinone-3.38/ns-3.38/scratch/moduli/resources/sat_tput_30min/";
     const int maxFileNumber = 315;
     // Random number selection for random trace file
     // Generate a random number between 1 and maxFileNumber

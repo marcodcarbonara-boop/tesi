@@ -220,7 +220,7 @@ Simple5gNetDevice::GetTypeId()
                           MakeBooleanChecker()) 
             .AddAttribute("CsvBasePath", 
                           "Path to the directory containing throughput CSV files (1.csv-100.csv).",
-                          StringValue("/home/ubuntu/ns-3-dev/scratch/tn-ntn-ns3/moduli/resources/tput1km"), 
+                          StringValue("/home/pasta1/ns-allinone-3.38/ns-3.38/scratch/moduli/resources/tput1km/"), 
                           MakeStringAccessor(&Simple5gNetDevice::m_csvBasePath),
                           MakeStringChecker())             
             .AddTraceSource("PhyRxDrop",
@@ -552,7 +552,7 @@ Simple5gNetDevice::SendFrom(Ptr<Packet> p,
 
     if (m_queue->Enqueue(p))
     {
-        if (m_queue->GetNPackets() == 1 && !FinishTransmissionEvent.IsPending())
+        if (m_queue->GetNPackets() == 1 && !FinishTransmissionEvent.IsRunning())
         {
             StartTransmission();
         }
@@ -570,7 +570,7 @@ Simple5gNetDevice::StartTransmission()
     {
         return;
     }
-    NS_ASSERT_MSG(!FinishTransmissionEvent.IsPending(),
+    NS_ASSERT_MSG(!FinishTransmissionEvent.IsRunning(),
                   "Tried to transmit a packet while another transmission was in progress");
     Ptr<Packet> packet = m_queue->Dequeue();
     /**
@@ -645,7 +645,7 @@ void
 Simple5gNetDevice::DoDispose()
 {
     NS_LOG_FUNCTION(this);
-    if (m_dataRateUpdateEvent.IsPending())
+    if (m_dataRateUpdateEvent.IsRunning())
     {
         m_dataRateUpdateEvent.Cancel(); // Cancel any pending position-based update events
     }
@@ -653,7 +653,7 @@ Simple5gNetDevice::DoDispose()
     m_node = nullptr;
     m_receiveErrorModel = nullptr;
     m_queue->Dispose();
-    if (FinishTransmissionEvent.IsPending())
+    if (FinishTransmissionEvent.IsRunning())
     {
         FinishTransmissionEvent.Cancel();
     }
