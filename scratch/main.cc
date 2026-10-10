@@ -32,6 +32,19 @@ uint64_t g_lastRxBytesSat = 0;
 uint64_t g_lastSentBytesBs = 0;
 uint64_t g_lastSentBytesSat = 0;
 
+struct MonitorState {
+    uint64_t rtTxTn = 0, rtRxTn = 0, rtTxNtn = 0, rtRxNtn = 0;
+    uint64_t nrtTxTn = 0, nrtTxNtn = 0, nrtRxTn = 0, nrtRxNtn = 0;
+};
+MonitorState g_mon;
+
+static double DeltaMbps(uint64_t current, uint64_t& last, double interval)
+{
+    double mbps = ((current - last) * 8.0) / (interval * 1e6);
+    last = current;
+    return mbps;
+}
+
 
 void LogNodePositionAndThroughput(Ptr<Node> node, std::string nodeName);
 void LoadWaypointsFromCsv(const std::string& filename, Ptr<WaypointMobilityModel> mobilityModel, Time timeOffset);
@@ -49,13 +62,25 @@ void MonitorThroughput(Ptr<BurstBufferedApplication> appBs, Ptr<BurstBufferedApp
 void SplitterMonitorThroughput(Ptr<BurstBufferedSplitterApplication> app, 
                              Ptr<PacketSink> sinkBs, Ptr<PacketSink> sinkSat, 
                              double interval);
+void LogMixedTrafficStats(Ptr<BurstBufferedSplitterApplication> appRt, 
+                          Ptr<PacketSink> sinkRtBs, Ptr<PacketSink> sinkRtSat, 
+                          Ptr<PacketSink> sinkNrtBs, Ptr<PacketSink> sinkNrtSat,
+                          Ptr<BurstBufferedApplication> appNrtBs, 
+                          Ptr<BurstBufferedApplication> appNrtSat);
+void MixedMonitorThroughput(Ptr<BurstBufferedSplitterApplication> appRt,
+                            Ptr<PacketSink> sinkRtBs, Ptr<PacketSink> sinkRtSat,
+                            Ptr<PacketSink> sinkNrtBs, Ptr<PacketSink> sinkNrtSat,
+                            Ptr<BurstBufferedApplication> appNrtBs,
+                            Ptr<BurstBufferedApplication> appNrtSat,
+                            Ptr<Simple5gNetDevice> ue5g,
+                            double interval);
 void GenerateGnuplotScript();
 void SetupSimulationDirectory();
 
 double genInterval = 0.001; // Seconds
 double burstInterval = 0.5; // Seconds
 int pktSize = 1024; // Bytes
-double maxDelay = burstInterval*3; // Seconds, massimo ritardo accettabile per i pacchetti nel buffer prima di essere scartati (per evitare staleness)
+double maxDelay = -1; // Seconds, massimo ritardo accettabile per i pacchetti nel buffer prima di essere scartati (per evitare staleness)
 //puo essere solo un multiplo di timeslot , vale almeno una durata intera di timeslot il pacchetto
 
 
@@ -97,9 +122,9 @@ LogComponentEnable("Ipv4L3Protocol", LOG_LEVEL_INFO);
 
 
     cmd.Parse(argc, argv);
+    if (maxDelay < 0) maxDelay = burstInterval * 3;
 
 
-    
     // Setup nodi
     NodeContainer bsNode; bsNode.Create(1);
     NodeContainer ueNode; ueNode.Create(1);
@@ -126,10 +151,12 @@ LogComponentEnable("Ipv4L3Protocol", LOG_LEVEL_INFO);
 file 18 rete 5g molto stabile
 file 34 congestione moderata 5g
 file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NTN
+file 400 rete 5g con perdirta di los, c'è bisogno di intervento dalla NTN
+
 */
 
     //ASSEGNAZIONE POSIZIONE WAYPOINT A UE
-    vector<int> validFiles = {18, 34, 45};
+    vector<int> validFiles = {18, 34, 45, 400};
     mt19937 rng;
     uint64_t timeSeed = std::chrono::high_resolution_clock::now().time_since_epoch().count();
     seed_seq seed_sequence{uint32_t(timeSeed), uint32_t(timeSeed >> 32)};
@@ -255,25 +282,44 @@ file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NT
     // --- Applications ---
     // ---------------------------------------------------------
 
-     // Definiamo due porte distinte per distinguere i flussi al ricevitore
-    uint16_t portBs = 9;
-    uint16_t portSat = 10;
+    // Definiamo due porte distinte per distinguere i flussi real time al ricevitore 
+    uint16_t portBsRt = 9;
+    uint16_t portSatRt = 10;
+
+    // Definiamo due porte distinte per distinguere i flussi non real time al ricevitore 
+    uint16_t portBsNrt = 11;
+    uint16_t portSatNrt = 12;
 
     // 1. Installiamo DUE Sink sul nodo destinazione
     
-    // Sink per BS (Porta 9)
-    PacketSinkHelper sinkHelperBs("ns3::UdpSocketFactory",
-                                  InetSocketAddress(Ipv4Address::GetAny(), portBs));
-    ApplicationContainer sinkAppsBs = sinkHelperBs.Install(sinkNode);
-    sinkAppsBs.Start(Seconds(0.0));
-    sinkAppsBs.Stop(Seconds(35.0)); 
+    // Sink per BS RT (Porta 9)
+    PacketSinkHelper sinkRtBs("ns3::UdpSocketFactory",
+                                  InetSocketAddress(Ipv4Address::GetAny(), portBsRt));
+    ApplicationContainer sinkAppsRtBs = sinkRtBs.Install(sinkNode);
+    sinkAppsRtBs.Start(Seconds(0.0));
+    sinkAppsRtBs.Stop(Seconds(35.0)); 
 
-    // Sink per SAT (Porta 10)
-    PacketSinkHelper sinkHelperSat("ns3::UdpSocketFactory",
-                                   InetSocketAddress(Ipv4Address::GetAny(), portSat));
-    ApplicationContainer sinkAppsSat = sinkHelperSat.Install(sinkNode);
-    sinkAppsSat.Start(Seconds(0.0));
-    sinkAppsSat.Stop(Seconds(35.0));
+    // Sink per SAT RT (Porta 10)
+    PacketSinkHelper sinkRtSat("ns3::UdpSocketFactory",
+                                   InetSocketAddress(Ipv4Address::GetAny(), portSatRt));
+    ApplicationContainer sinkAppsRtSat = sinkRtSat.Install(sinkNode);
+    sinkAppsRtSat.Start(Seconds(0.0));
+    sinkAppsRtSat.Stop(Seconds(35.0));
+
+    // Sink per BS NRT (Porta 11)
+    PacketSinkHelper sinkNrtBs("ns3::UdpSocketFactory",
+                                  InetSocketAddress(Ipv4Address::GetAny(), portBsNrt));
+    ApplicationContainer sinkAppsNrtBs = sinkNrtBs.Install(sinkNode);
+    sinkAppsNrtBs.Start(Seconds(0.0));
+    sinkAppsNrtBs.Stop(Seconds(35.0)); 
+
+    // Sink per SAT NRT (Porta 12)
+    PacketSinkHelper sinkNrtSat("ns3::UdpSocketFactory",
+                                   InetSocketAddress(Ipv4Address::GetAny(), portSatNrt));
+    ApplicationContainer sinkAppsNrtSat = sinkNrtSat.Install(sinkNode);
+    sinkAppsNrtSat.Start(Seconds(0.0));
+    sinkAppsNrtSat.Stop(Seconds(35.0));
+
 
     // Recuperiamo i riferimenti necessari
     Ptr<Node> ue = ueNode.Get(0);
@@ -295,12 +341,15 @@ file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NT
     // ---------------------------------------------------------
     // APP 1: Terrestrial Path (Target: Porta 9)
     // ---------------------------------------------------------
+
+    //DECOMENTARE PER USARE SENZA DISTINZIONE RT E NRT
+    /* 
     NS_LOG_INFO("Configuring Burst App 1 (Terrestrial 5G)");
-    
+
     Ptr<BurstBufferedApplication> appBs = CreateObject<BurstBufferedApplication>();
     
     appBs->SetStartTime(Seconds(0.0));
-    appBs->SetStopTime(Seconds(10.0));
+    appBs->SetStopTime(Seconds(15.0));
     // Argomenti: DestAddress, Port, PacketSize, GenInterval, BurstInterval, Device, LocalIP
     appBs->Setup(InetSocketAddress(sinkIpViaBs, portBs), 
                  portBs,                                 
@@ -311,13 +360,15 @@ file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NT
         //APPLICAZIONE TRAFFICO SOLO SU RETE TN, decommentare per visualizzare scenario con traffico separato TN e NTN                        
    //ue->AddApplication(appBs);
 
+   
+
     // ---------------------------------------------------------
     // APP 2: Satellite Path (Target: Porta 10)
     // ---------------------------------------------------------
     NS_LOG_INFO("Configuring Burst App 2 (Satellite)");
     Ptr<BurstBufferedApplication> appSat = CreateObject<BurstBufferedApplication>();
     appSat->SetStartTime(Seconds(0.0)); 
-    appSat->SetStopTime(Seconds(10.0));
+    appSat->SetStopTime(Seconds(15.0));
     appSat->Setup(InetSocketAddress(sinkIpViaSat, portSat), 
         portSat, 
         pktSize,             // Packet Size
@@ -327,17 +378,19 @@ file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NT
             
     //APPLICAZIONE TRAFFICO SOLO SU RETE NTN, decommentare per visualizzare scenario con traffico separato TN e NTN
    // ue->AddApplication(appSat);
+   */
 
+    //COMENTARE PER USARE SENZA DISTINZIONE RT E NRT
     // ---------------------------------------------------------
-    // APP 3: Terrestrial + Satellite (Target: Porta 9 e Porta 10)
+    // Terrestrial + Satellite (Target: Porta 9 e Porta 10)
     // ---------------------------------------------------------
     NS_LOG_INFO("Configuring Burst App 3 (Splitter TN + NTN)");
-    Ptr<BurstBufferedSplitterApplication> appSplitter = CreateObject<BurstBufferedSplitterApplication>();
-    appSplitter->Setup(
+    Ptr<BurstBufferedSplitterApplication> appRtSplitter = CreateObject<BurstBufferedSplitterApplication>();
+    appRtSplitter->Setup(
         sinkIpViaBs,
         sinkIpViaSat,
-        portBs,
-        portSat,
+        portBsRt,
+        portSatRt,
         pktSize,
         Seconds(genInterval), 
         Seconds(burstInterval), 
@@ -345,10 +398,38 @@ file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NT
         ue5gDevice,
         ueSatDevice
                 );
-     appSplitter->SetStartTime(Seconds(0.0));
-    appSplitter->SetStopTime(Seconds(10.0));     
+    appRtSplitter->SetStartTime(Seconds(0.0));
+    appRtSplitter->SetStopTime(Seconds(15.0));     
     //APPLICAZIONE SPLITTER TRAFFICO SU TN E NTN, decommentare per visualizzare scenario con splitter TN e NTN                                                  
-    ue->AddApplication(appSplitter);
+    ue->AddApplication(appRtSplitter);
+
+    //  APPLICAZIONE NON-REAL-TIME SULLA RETE TERRESTRE  (porta 11)
+    Ptr<BurstBufferedApplication> appNrtBs = CreateObject<BurstBufferedApplication>();
+    appNrtBs->Setup(
+        InetSocketAddress(sinkIpViaBs, portBsNrt),
+        portBsNrt,
+        pktSize,
+        Seconds(genInterval *2),
+        Seconds(burstInterval),
+        ue5gDevice
+                );
+    appNrtBs->SetStartTime(Seconds(0.0));
+    appNrtBs->SetStopTime(Seconds(15.0));     
+    ue->AddApplication(appNrtBs);
+
+    //  APPLICAZIONE NON-REAL-TIME SULLA RETE SATELLITARE (porta 12)
+    Ptr<BurstBufferedApplication> appNrtSat = CreateObject<BurstBufferedApplication>();
+    appNrtSat->Setup(
+        InetSocketAddress(sinkIpViaSat, portSatNrt),
+        portSatNrt,
+        pktSize,
+        Seconds(genInterval *4),
+        Seconds(burstInterval),
+        ueSatDevice
+                );
+    appNrtSat->SetStartTime(Seconds(0.0));
+    appNrtSat->SetStopTime(Seconds(15.0));     
+    ue->AddApplication(appNrtSat);
 
     
 
@@ -365,8 +446,16 @@ file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NT
     }
 
     // 2. Otteniamo i puntatori ai Sink PRIMA del Run per poterli passare al monitor
-    Ptr<PacketSink> sinkPtrBs = DynamicCast<PacketSink>(sinkAppsBs.Get(0));
-    Ptr<PacketSink> sinkPtrSat = DynamicCast<PacketSink>(sinkAppsSat.Get(0));
+    //nessuna separazione Rt e NRT
+    //Ptr<PacketSink> sinkPtrBs = DynamicCast<PacketSink>(sinkAppsBs.Get(0));
+    //Ptr<PacketSink> sinkPtrSat = DynamicCast<PacketSink>(sinkAppsSat.Get(0));
+
+    //Separazione RT e NRT
+    Ptr<PacketSink> sinkPtrRtBs = DynamicCast<PacketSink>(sinkAppsRtBs.Get(0));
+    Ptr<PacketSink> sinkPtrRtSat = DynamicCast<PacketSink>(sinkAppsRtSat.Get(0));
+    Ptr<PacketSink> sinkPtrNrtBs = DynamicCast<PacketSink>(sinkAppsNrtBs.Get(0));
+    Ptr<PacketSink> sinkPtrNrtSat = DynamicCast<PacketSink>(sinkAppsNrtSat.Get(0));
+
 
     // 3. Scheduliamo il monitoraggio ogni 0.1 secondi
 
@@ -374,8 +463,19 @@ file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NT
    //Simulator::Schedule(Seconds(0.0), &MonitorThroughput, appBs, appSat, sinkPtrBs, sinkPtrSat, 0.1);
 
     //DECOMMENTA QUESTO SE VUOI VEDERE LO SPLITTER
-    Simulator::Schedule(Seconds(0.0), &SplitterMonitorThroughput, appSplitter, sinkPtrBs, sinkPtrSat, 0.1);
 
+    //  MONITORAGGIO THROUGHPUT (Riferito allo Splitter Real-Time)
+    /*
+    Simulator::Schedule(Seconds(0.0),  &MixedMonitorThroughput, appRtSplitter,
+                    sinkPtrRtBs, sinkPtrRtSat, sinkPtrNrtBs, sinkPtrNrtSat,
+                    appNrtBs, appNrtSat, 0.1);*/
+
+    Simulator::Schedule(Seconds(0.0), [=]() {
+    MixedMonitorThroughput(appRtSplitter, sinkPtrRtBs, sinkPtrRtSat,
+                           sinkPtrNrtBs, sinkPtrNrtSat,
+                           appNrtBs, appNrtSat, 0.1);
+});
+    
     // ---------------------------------------------------------
     // Run & Log
     // ---------------------------------------------------------
@@ -383,15 +483,22 @@ file 45 rete 5g completamente congestionata, c'è bisogno di intervento dalla NT
     // Log posizione (commentato se non serve sempre)
     //LogNodePositionAndThroughput(ue, "UE");
 
-    Simulator::Stop(Seconds(15.0)); 
+    Simulator::Stop(Seconds(17.0)); 
     Simulator::Run();
 
+    //split con RT e NRT
+
+    // REPORT FINALE (per Traffico Misto RT + NRT)
+    LogMixedTrafficStats(appRtSplitter, sinkPtrRtBs, sinkPtrRtSat, sinkPtrNrtBs, sinkPtrNrtSat, appNrtBs, appNrtSat);
+
+
+    //non distinque rt e nrt
     // Log Statistiche Finali
     //DECOMMENTA QUESTO SE VUOI VEDERE STATISTICHE SEPARATE TN E NTN
     //LogTrafficStats(appBs, appSat, sinkPtrBs, sinkPtrSat);
 
     //DECOMMENTA QUESTO SE VUOI VEDERE STATISTICHE SPLITTER TN E NTN
-    SplitterLogTrafficStats(appSplitter, sinkPtrBs, sinkPtrSat);
+    //SplitterLogTrafficStats(appSplitter, sinkPtrBs, sinkPtrSat);
 
     // Chiudiamo il file e generiamo lo script plot
     g_throughputTrace.close();
@@ -653,13 +760,126 @@ void MonitorThroughput(Ptr<BurstBufferedApplication> appBs, Ptr<BurstBufferedApp
     // Rischedula
     Simulator::Schedule(Seconds(interval), &MonitorThroughput, appBs, appSat, sinkBs, sinkSat, interval);
 }
+
+void LogMixedTrafficStats(Ptr<BurstBufferedSplitterApplication> appRt, 
+                          Ptr<PacketSink> sinkRtBs, Ptr<PacketSink> sinkRtSat, 
+                          Ptr<PacketSink> sinkNrtBs, Ptr<PacketSink> sinkNrtSat,
+                          Ptr<BurstBufferedApplication> appNrtBs, 
+                          Ptr<BurstBufferedApplication> appNrtSat )
+{
+    double toMB = 1.0 / (1e6); // Conversione da Byte a Megabyte (MB)
+
+    // 1\. Dati Real-Time (RT)
+    double genRtMB = appRt->GetGeneratedBytes() * toMB;
+    double sentRtBsMB = appRt->GetSentBytesTN() * toMB;
+    double sentRtSatMB = appRt->GetSentBytesNTN() * toMB;
+    double rxRtBsMB = sinkRtBs->GetTotalRx() * toMB;
+    double rxRtSatMB = sinkRtSat->GetTotalRx() * toMB; 
+    double totalRtRxMB = rxRtBsMB + rxRtSatMB; 
+
+    // Calcolo Backlog (pacchetti rimasti nel buffer dell'app) e Perdite di Rete
+
+    double backlogRtMB = genRtMB - sentRtBsMB - sentRtSatMB; 
+    double lossRtBsMB    = sentRtBsMB - rxRtBsMB;  
+    double lossRtSatMB    = sentRtSatMB - rxRtSatMB;  
+    double lossPercRtBs = (sentRtBsMB > 0) ? (lossRtBsMB / sentRtBsMB) * 100.0 : 0.0;
+    double lossPercRtSat = (sentRtSatMB > 0) ? (lossRtSatMB / sentRtSatMB) * 100.0 : 0.0;
+
+
+    // 2\. Dati Non-Real-Time (NRT / Background) 
+    double rxNrtBsMB = sinkNrtBs->GetTotalRx() * toMB;
+    double rxNrtSatMB = sinkNrtSat->GetTotalRx() * toMB; 
+
+    double residualRtMB  = appRt->GetCurrentBufferBytes() * toMB;
+    double discardedRtMB = backlogRtMB - residualRtMB;     // scartati per maxDelay (se negativo, l'ipotesi è falsa)
+
+    double genNrtBsMB   = appNrtBs->GetGeneratedBytes() * toMB;
+    double sentNrtBsMB  = appNrtBs->GetSentBytes() * toMB;
+    double genNrtSatMB  = appNrtSat->GetGeneratedBytes() * toMB;
+    double sentNrtSatMB = appNrtSat->GetSentBytes() * toMB;
+
+    double lossNrtBsMB  = sentNrtBsMB - rxNrtBsMB;
+    double lossNrtSatMB = sentNrtSatMB - rxNrtSatMB;
+    double lossPercNrtBs  = (sentNrtBsMB  > 0) ? lossNrtBsMB  / sentNrtBsMB  * 100.0 : 0.0;
+    double lossPercNrtSat = (sentNrtSatMB > 0) ? lossNrtSatMB / sentNrtSatMB * 100.0 : 0.0;
+    double totalNrtRxMB = rxNrtBsMB + rxNrtSatMB;
+
+    // 3\. TOTALI COMPLESSIVI TERRESTRE (TN) E SATELLITARE (SAT)
+    double totalSentTN = sentRtBsMB + sentNrtBsMB;
+    double totalRxTN = rxRtBsMB + rxNrtBsMB;
+    double totalLossTN = totalSentTN - totalRxTN;
+    double lossPercTotalTN = (totalSentTN > 0) ? (totalLossTN / totalSentTN) * 100.0 : 0.0;
+
+    double totalSentSAT = sentRtSatMB + sentNrtSatMB;
+    double totalRxSAT = rxRtSatMB + rxNrtSatMB;
+    double totalLossSAT = totalSentSAT - totalRxSAT;
+    double lossPercTotalSAT = (totalSentSAT > 0) ? (totalLossSAT / totalSentSAT)* 100.0 : 0.0;
+
+    // 4\. TOTALE COMPLESSIVO GLOBALE (TN + SAT)
+    double totalSentGlobal = totalSentTN + totalSentSAT;
+    double totalRxGlobal = totalRxTN + totalRxSAT;
+    double totalLossGlobal = totalSentGlobal - totalRxGlobal;
+    double globalLossPerc = (totalSentGlobal > 0) ? (totalLossGlobal / totalSentGlobal) * 100.0 : 0.0;
+    double totalGenGlobal = genRtMB + genNrtBsMB + genNrtSatMB;
+    double deliveryRatio  = (totalGenGlobal > 0) ? totalRxGlobal / totalGenGlobal * 100.0 : 0.0;
+        
+    double steeringCoeff = appRt -> GetSteeringCoefficient();
+
+
+    // 5\. Stampa del Report Finale
+    std::cout << "\n========= DETAILED TRAFFIC REPORT =========\n\n";
+
+    std::cout << "[1] TRAFFICO REAL-TIME \n"; 
+    std::cout << " Totale Generato dalla Sorgente : " << genRtMB <<  " MB\n";
+    std::cout << " Inviato su 5G (TN) : " << sentRtBsMB <<  " MB\n";
+    std::cout << " Inviato su Satellite (NTN) : " << sentRtSatMB <<  " MB\n";
+    std::cout << " Scartati per maxDelay : " << discardedRtMB <<  " MB\n";
+    std::cout << " Reciduo a fine sim : " << residualRtMB <<  " MB\n";
+
+
+    std::cout << " ----------------------------\n ";
+    std::cout << "Ricevuto al sink 5G (Porta 9) : " << rxRtBsMB<< " MB (" << lossPercRtBs << "%"<<" perdita di rete)\n";
+    std::cout << "Ricevuto al sink Sat (Porta 10) : " << rxRtSatMB<< " MB (" << lossPercRtSat << "%"<< " perdita di rete)\n";
+    std::cout << "-> TOTALE RT CONSEGNATO : "<< totalRtRxMB <<  " MB\n";    
+
+    std::cout << " ----------------------------\n ";
+    std::cout << "  -> [2] TRAFFICO NON-REAL-TIME:\n";
+    std::cout << "     * Totale Generato dalla Sorgente: " << genNrtMB << " MB\n";
+    std::cout << "     * Totale Inviato: " << sentNrtMB << " MB\n";
+    std::cout << "     * Ricevuto via 5G (Porta 11): " << rx5GNrtMB << " MB\n";
+    std::cout << "     * Ricevuto via Sat (Porta 12): " << rxSatNrtMB << " MB\n";
+    std::cout << "     * Totale NRT CONSEGNATO: " << rxNrtMB << " MB (Loss: " << lossPercNrt << "%)\n";
+    std::cout << " ----------------------------\n ";
+
+    std::cout << "[3] TOTALI COMPLESSIVI PER CANALE DI RETE \n"; 
+    std::cout << "CANALE TERRESTRE (TN 5G) :\n"; 
+    std::cout << "Totale Inviato : "<< totalSentTN <<  " MB\n";
+    std::cout << "Totale Ricevuto : "<< totalRxTN <<  " MB\n";
+    std::cout << "Network Loss TN "<< totalLossTN <<  " MB (" << lossPercTotalTN << "% )\n";
+
+    std::cout << "CANALE SATELLITARE (NTN LEO) :\n";
+    std::cout << "Totale Inviato : "<< totalSentSAT <<  " MB\n";
+    std::cout << "Totale Ricevuto : "<< totalRxSAT <<  " MB\n";
+    std::cout << "Network Loss NTN : "<< totalLossSAT <<  " MB (" << lossPercTotalSAT << "% )\n";
+ 
+    std::cout << "======================================================\n";
+    std::cout << "  -> [4] RIEPILOGO GLOBALE DELLA SIMULAZIONE:\n";
+    std::cout << "     * Totale Traffico Inviato : " << totalSentGlobal << " Mbit/s\n";
+    std::cout << "     * Totale Traffico Ricevuto : " << totalRxGlobal << " MB\n";
+    std::cout << "     * Totale Pacchetti Persi in Rete: " << totalLossGlobal << " MB\n";
+    std::cout << "     * Network Loss PERCENTUALE GLOBALE: " << lossPercGlobal << " %\n";
+    std::cout << "     * Consegnato/Generato globale: " << deliveryRatio << " %\n";
+
+    std::cout << "Steering Coeff alpha(k) Finale : "<< steeringCoeff <<  "\n";
+
+}
+
 void SplitterMonitorThroughput(Ptr<BurstBufferedSplitterApplication> app, 
                        Ptr<PacketSink> sinkBs, Ptr<PacketSink> sinkSat, 
                        double interval)
 {
     double now = Simulator::Now().GetSeconds();
 
-    
     // 1. Dati LATO SINK (Ricezione)
     uint64_t currentRxBs = sinkBs->GetTotalRx(); 
     uint64_t currentRxSat = sinkSat->GetTotalRx();
@@ -716,6 +936,51 @@ void SplitterMonitorThroughput(Ptr<BurstBufferedSplitterApplication> app,
     Simulator::Schedule(Seconds(interval), &SplitterMonitorThroughput, app, sinkBs, sinkSat, interval);
 }
 
+void MixedMonitorThroughput(Ptr<BurstBufferedSplitterApplication> appRt,
+                            Ptr<PacketSink> sinkRtBs, Ptr<PacketSink> sinkRtSat,
+                            Ptr<PacketSink> sinkNrtBs, Ptr<PacketSink> sinkNrtSat,
+                            Ptr<BurstBufferedApplication> appNrtBs,
+                            Ptr<BurstBufferedApplication> appNrtSat,
+                            Ptr<Simple5gNetDevice> ue5g,
+                            double interval)
+{
+    double now = Simulator::Now().GetSeconds();
+
+    double rtTxTn   = DeltaMbps(appRt->GetSentBytesTN(),  g_mon.rtTxTn,  interval);
+    double rtRxTn   = DeltaMbps(sinkRtBs->GetTotalRx(),   g_mon.rtRxTn,  interval);
+    double rtTxNtn  = DeltaMbps(appRt->GetSentBytesNTN(), g_mon.rtTxNtn, interval);
+    double rtRxNtn  = DeltaMbps(sinkRtSat->GetTotalRx(),  g_mon.rtRxNtn, interval);
+
+    double nrtTxTn  = DeltaMbps(appNrtBs->GetSentBytes(),  g_mon.nrtTxTn,  interval);
+    double nrtRxTn  = DeltaMbps(sinkNrtBs->GetTotalRx(),   g_mon.nrtRxTn,  interval);
+    double nrtTxNtn = DeltaMbps(appNrtSat->GetSentBytes(), g_mon.nrtTxNtn, interval);
+    double nrtRxNtn = DeltaMbps(sinkNrtSat->GetTotalRx(),  g_mon.nrtRxNtn, interval);
+
+    double alpha         = appRt->GetSteeringCoefficient();
+    double nrtBufBsMbit  = (appNrtBs->GetCurrentBufferBytes()  * 8.0) / 1e6;
+    double nrtBufSatMbit = (appNrtSat->GetCurrentBufferBytes() * 8.0) / 1e6;
+    double bufferMbits = (appRt->GetCurrentBufferBytes() * 8.0) / 1e6;
+
+    DataRateValue drv;
+    ue5g->GetAttribute("DataRate", drv);       
+    double cap5gMbps     = drv.Get().GetBitRate() / 1e6;
+
+    // Col: 1 time | 2 RT Tx TN | 3 RT Rx TN | 4 RT Tx NTN | 5 RT Rx NTN | 6 buffer
+    //      7 NRT Tx TN | 8 NRT Rx TN | 9 NRT Tx NTN | 10 NRT Rx NTN
+    g_throughputTrace << now << " "
+                      << rtTxTn << " " << rtRxTn << " " << rtTxNtn << " " << rtRxNtn << " "
+                      << bufferMbits << " "
+                      << nrtTxTn << " " << nrtRxTn << " " << nrtTxNtn << " " << nrtRxNtn
+                      << " " << alpha << " " << nrtBufBsMbit << " " << nrtBufSatMbit << " " << cap5gMbps
+                      << std::endl;
+
+    Simulator::Schedule(Seconds(interval), [=]() {
+    MixedMonitorThroughput(appRt, sinkRtBs, sinkRtSat,
+                           sinkNrtBs, sinkNrtSat,
+                           appNrtBs, appNrtSat, interval);
+});
+}
+
 // --- Generazione Script Gnuplot ---
 void GenerateGnuplotScript()
 {
@@ -723,7 +988,12 @@ void GenerateGnuplotScript()
     std::string datPath = g_outputDir + "/throughput_trace.dat";
     std::string png5g = g_outputDir + "/throughput_5g.png";
     std::string pngSat = g_outputDir + "/throughput_sat.png";
-    std::string pngBuffer = g_outputDir + "/buffer_occupancy.png"; 
+    std::string pngBuffer = g_outputDir + "/buffer_occupancy.png";
+    std::string pngNrt5g = g_outputDir + "/throughput_5g_nrt.png";
+    std::string pngNrtSat = g_outputDir + "/throughput_sat_nrt.png";
+    std::string pngAlpha = g_outputDir + "/alpha.png";
+    std::string pngNrtBuf = g_outputDir + "/buffer_nrt.png";
+    std::string pngCap = g_outputDir + "/capacity_5g.png";
 
     std::ofstream plotFile;
     plotFile.open(pltPath);
@@ -732,42 +1002,83 @@ void GenerateGnuplotScript()
     plotFile << "set terminal png size 1200,800 enhanced font 'Verdana,18'" << std::endl;
     plotFile << "set grid" << std::endl;
     plotFile << "set style data lines" << std::endl;
-    plotFile << "set key top left" << std::endl; 
+    plotFile << "set key top left" << std::endl;
     plotFile << "set xlabel 'Simulation Time (s)'" << std::endl;
-    
+
     // --- GRAFICO 1: 5G Terrestre (Solo Throughput) ---
     plotFile << "set output '" << png5g << "'" << std::endl;
     plotFile << "set title '5G Channel: Burst (Tx) vs Sink Received (Rx)'" << std::endl;
     plotFile << "set ylabel 'Throughput (Mbps)' textcolor rgb 'black'" << std::endl;
-    
+
     // Disabilita asse Y destro per pulizia
     plotFile << "unset y2tics" << std::endl;
     plotFile << "unset y2label" << std::endl;
     plotFile << "set ytics mirror" << std::endl;
 
-    plotFile << "plot '" << datPath << "' using 1:2 title 'Burst Tx Rate' lw 2 lc rgb 'blue', \\" << std::endl;
-    plotFile << "     '" << datPath << "' using 1:3 title 'Sink Rx Rate' lw 2 lc rgb 'green'" << std::endl;
+    plotFile << "plot '" << datPath << "' using 1:2 title 'RT Tx' lw 2 lc rgb 'blue', \\" << std::endl;
+    plotFile << "     '" << datPath << "' using 1:3 title 'RT Rx' lw 2 lc rgb 'green'" << std::endl;
 
     // --- GRAFICO 2: Satellite (Solo Throughput) ---
     plotFile << "set output '" << pngSat << "'" << std::endl;
     plotFile << "set title 'Satellite Channel: Burst (Tx) vs Sink Received (Rx)'" << std::endl;
 
-    plotFile << "plot '" << datPath << "' using 1:4 title 'Burst Tx Rate' lw 2 lc rgb 'red', \\" << std::endl;
-    plotFile << "     '" << datPath << "' using 1:5 title 'Sink Rx Rate' lw 2 lc rgb 'orange'" << std::endl;
+    plotFile << "plot '" << datPath << "' using 1:4 title '5G Channel (RT)' lw 2 lc rgb 'red', \\" << std::endl;
+    plotFile << "     '" << datPath << "' using 1:5 title 'Satellite Channel (RT)' lw 2 lc rgb 'orange'" << std::endl;
 
     // --- GRAFICO 3: Buffer Occupancy Comparison ---
     plotFile << "set output '" << pngBuffer << "'" << std::endl;
     plotFile << "set title 'Buffer Occupancy'" << std::endl;
     plotFile << "set ylabel 'Buffer Occupancy (Mbits)' textcolor rgb 'black'" << std::endl;
 
-    plotFile << "plot '" << datPath << "' using 1:6 title 'App Buffer' lw 2 lc rgb 'blue', \\" << std::endl;
+    plotFile << "plot '" << datPath << "' using 1:6 title 'App Buffer' lw 2 lc rgb 'blue'" << std::endl;
+
+    // --- GRAFICO 4: 5G Terrestre, traffico NRT (colonne 7-8) ---
+    plotFile << "set output '" << pngNrt5g << "'" << std::endl;
+    plotFile << "set title 'NRT 5G Channel: Burst (Tx) vs Sink Received (Rx)'" << std::endl;
+    plotFile << "set ylabel 'Throughput (Mbps)' textcolor rgb 'black'" << std::endl;
+
+    plotFile << "plot '" << datPath << "' using 1:7 title 'NRT Tx Rate' lw 2 lc rgb 'purple', \\" << std::endl;
+    plotFile << "     '" << datPath << "' using 1:8 title 'NRT Rx Rate' lw 2 lc rgb '#008B8B'" << std::endl;
+
+    // --- GRAFICO 5: Satellite, traffico NRT (colonne 9-10) ---
+    plotFile << "set output '" << pngNrtSat << "'" << std::endl;
+    plotFile << "set title 'NRT Satellite Channel: Burst (Tx) vs Sink Received (Rx)'" << std::endl;
+
+    plotFile << "plot '" << datPath << "' using 1:9 title 'NRT Tx Rate' lw 2 lc rgb 'brown', \\" << std::endl;
+    plotFile << "     '" << datPath << "' using 1:10 title 'NRT Rx Rate' lw 2 lc rgb '#DAA520'" << std::endl;
+
+    plotFile << "set output '" << pngAlpha << "'" << std::endl;
+    plotFile << "set title 'Steering coefficient alpha(k)'" << std::endl;
+    plotFile << "set ylabel 'alpha'" << std::endl;
+    plotFile << "plot '" << datPath << "' using 1:11 title 'alpha(k)' lw 2 lc rgb 'black'" << std::endl;
+
+    plotFile << "set output '" << pngNrtBuf << "'" << std::endl;
+    plotFile << "set title 'NRT Buffer Occupancy'" << std::endl;
+    plotFile << "set ylabel 'Buffer Occupancy (Mbits)'" << std::endl;
+    plotFile << "plot '" << datPath << "' using 1:12 title 'NRT buffer 5G' lw 2 lc rgb 'purple', \\" << std::endl;
+    plotFile << "     '" << datPath << "' using 1:13 title 'NRT buffer Sat' lw 2 lc rgb 'brown'" << std::endl;
+
+    plotFile << "set output '" << pngCap << "'" << std::endl;
+    plotFile << "set title '5G: capacita vs Rx RT+NRT'" << std::endl;
+    plotFile << "set ylabel 'Throughput (Mbps)'" << std::endl;
+    plotFile << "plot '" << datPath << "' using 1:14 title 'Capacita 5G' lw 2 lc rgb 'black', \\" << std::endl;
+    plotFile << "     '" << datPath << "' using 1:($3+$8) title 'Rx RT+NRT' lw 2 lc rgb 'green'" << std::endl;
 
     plotFile.close();
 
-  NS_LOG_INFO("Gnuplot script generated at: " << pltPath);
+    NS_LOG_INFO("Gnuplot script generated at: " << pltPath);
     std::string gnuplotCmd = "gnuplot " + pltPath;
-int ret = system(gnuplotCmd.c_str());
-    system(("feh " + png5g + " " + pngSat + " " + pngBuffer + " &").c_str());
+    int ret = system(gnuplotCmd.c_str());
+    if (ret != 0)
+    {
+        std::cerr << "gnuplot failed: " << gnuplotCmd << std::endl;
+        return;
+    }
+    if (system(("feh " + png5g + " " + pngSat + " " + pngBuffer + " " +
+                pngNrt5g + " " + pngNrtSat + " &").c_str()) != 0)
+    {
+        std::cerr << "feh failed" << std::endl;
+    }
 }
 
 
